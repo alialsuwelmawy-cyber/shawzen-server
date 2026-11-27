@@ -86,6 +86,7 @@ function createBotEntry(room) {
     items: [],
     cuffed: false,
     hasShield: false,
+    shieldTurns: 0,
     pillowTurns: 0,
     weaponId: WEAPONS[Math.floor(Math.random() * WEAPONS.length)],
     skinId: SKINS[Math.floor(Math.random() * SKINS.length)]
@@ -139,6 +140,7 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
         eliminated: p.hearts <= 0,
         cuffed: p.cuffed,
         hasShield: p.hasShield,
+        shieldTurns: p.shieldTurns || 0,
         pillowTurns: isSelf ? p.pillowTurns : 0,
         weaponId: p.weaponId,
         skinId: p.skinId,
@@ -218,6 +220,14 @@ function beginTurn(room) {
     current.pillowTurns--;
   }
 
+  if (current.shieldTurns > 0) {
+    current.shieldTurns--;
+    if (current.shieldTurns <= 0) {
+      current.shieldTurns = 0;
+      current.hasShield = false;
+    }
+  }
+
   if (current.cuffed) {
     current.cuffed = false;
     broadcastGameState(room, `⛓️ ${current.name} مقيد وتخطى دوره!`, 'gold');
@@ -273,17 +283,18 @@ function advanceTurn(room) {
     return;
   }
 
+  let nextIdx = (room.turnIndex + 1) % room.players.length;
+  while (room.players[nextIdx].hearts <= 0) {
+    nextIdx = (nextIdx + 1) % room.players.length;
+  }
+  room.turnIndex = nextIdx;
+
   if (room.chamber.length === 0) {
     room.round++;
     startNewRound(room, false);
     return;
   }
 
-  let nextIdx = (room.turnIndex + 1) % room.players.length;
-  while (room.players[nextIdx].hearts <= 0) {
-    nextIdx = (nextIdx + 1) % room.players.length;
-  }
-  room.turnIndex = nextIdx;
   beginTurn(room);
 }
 
@@ -376,7 +387,8 @@ function executeBotTurn(room, bot) {
   if (shieldIdx !== -1 && !bot.hasShield) {
     bot.items.splice(shieldIdx, 1);
     bot.hasShield = true;
-    broadcastGameState(room, `🛡️ ${bot.name} فعّل الدرع!`, 'safe');
+    bot.shieldTurns = 3;
+    broadcastGameState(room, `🛡️ ${bot.name} فعّل الدرع (3 أدوار)!`, 'safe');
     room.botTimeout = setTimeout(() => executeBotTurn(room, bot), 600);
     return;
   }
@@ -450,6 +462,7 @@ io.on('connection', (socket) => {
       items: [],
       cuffed: false,
       hasShield: false,
+      shieldTurns: 0,
       pillowTurns: 0,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic'
@@ -541,6 +554,7 @@ io.on('connection', (socket) => {
       items: [],
       cuffed: false,
       hasShield: false,
+      shieldTurns: 0,
       pillowTurns: 0,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic'
@@ -650,11 +664,31 @@ io.on('connection', (socket) => {
       p.items = [];
       p.cuffed = false;
       p.hasShield = false;
+      p.shieldTurns = 0;
       p.pillowTurns = 0;
     });
 
     if (typeof ack === 'function') ack({ ok: true });
     startNewRound(room, true);
+  });
+
+  socket.on('send_emote', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room || !room.started) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender) return;
+
+    const emoji = String(payload.emoji || '').trim().slice(0, 8);
+    if (!emoji) return;
+
+    io.to(room.code).emit('player_emote', {
+      playerId: sender.id,
+      playerName: sender.name,
+      emoji
+    });
   });
 
   socket.on('aim_target', (payload = {}) => {
@@ -691,6 +725,7 @@ io.on('connection', (socket) => {
     if (target.hasShield) {
       actor.items.splice(slotIndex, 1);
       target.hasShield = false;
+        target.shieldTurns = 0;
       const msg = `🛡️ درع ${target.name} تصدّى للسارق وتحطّم!`;
       socket.emit('thief_blocked');
       io.to(room.code).emit('action_event', {
@@ -775,7 +810,8 @@ io.on('connection', (socket) => {
       if (actor.hasShield) return;
       actor.items.splice(slotIndex, 1);
       actor.hasShield = true;
-      msg = `🛡️ ${actor.name} فعّل الدرع الواقي!`;
+      actor.shieldTurns = 3;
+      msg = `🛡️ ${actor.name} فعّل الدرع الواقي (3 أدوار)!`;
       highlight = 'safe';
     } else if (itemKey === 'pillow') {
       actor.items.splice(slotIndex, 1);
@@ -787,6 +823,7 @@ io.on('connection', (socket) => {
       actor.items.splice(slotIndex, 1);
       if (target.hasShield) {
         target.hasShield = false;
+        target.shieldTurns = 0;
         msg = `🛡️ درع ${target.name} تصدّى للقيود وتحطّم!`;
         highlight = 'safe';
       } else {
@@ -800,6 +837,7 @@ io.on('connection', (socket) => {
       actor.items.splice(slotIndex, 1);
       if (target.hasShield) {
         target.hasShield = false;
+        target.shieldTurns = 0;
         msg = `🛡️ درع ${target.name} منع التبادل وتحطّم!`;
         highlight = 'safe';
       } else {
@@ -815,6 +853,7 @@ io.on('connection', (socket) => {
       actor.items.splice(slotIndex, 1);
       if (target.hasShield) {
         target.hasShield = false;
+        target.shieldTurns = 0;
         msg = `🛡️ درع ${target.name} تصدّى للسارق وتحطّم!`;
         highlight = 'safe';
       } else if (target.items.length > 0) {
