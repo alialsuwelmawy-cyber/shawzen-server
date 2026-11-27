@@ -445,6 +445,8 @@ io.on('connection', (socket) => {
         if (hp) {
           hp.id = socket.id;
           hp.socketId = socket.id;
+          if (payload.name || payload.playerName) hp.name = (payload.name || payload.playerName).toString().trim().slice(0, 14);
+          if (payload.avatar) hp.avatar = payload.avatar.toString().trim().slice(0, 4);
         }
         socket.join(requestedCode);
         socket.data.roomCode = requestedCode;
@@ -470,7 +472,7 @@ io.on('connection', (socket) => {
       token: playerToken,
       socketId: socket.id,
       name: (payload.name || payload.playerName || 'المضيف').toString().trim().slice(0, 14),
-      avatar: '😎',
+      avatar: (payload.avatar || '😎').toString().trim().slice(0, 4),
       isBot: false,
       hearts: MAX_HEARTS,
       maxHp: MAX_HEARTS,
@@ -532,6 +534,8 @@ io.on('connection', (socket) => {
     if (existingByToken) {
       existingByToken.id = socket.id;
       existingByToken.socketId = socket.id;
+      if (payload.name || payload.playerName) existingByToken.name = (payload.name || payload.playerName).toString().trim().slice(0, 14);
+      if (payload.avatar) existingByToken.avatar = payload.avatar.toString().trim().slice(0, 4);
       if (room.hostToken === playerToken) room.hostId = socket.id;
       socket.join(cleanCode);
       socket.data.roomCode = cleanCode;
@@ -565,7 +569,7 @@ io.on('connection', (socket) => {
       token: playerToken,
       socketId: socket.id,
       name: (payload.name || payload.playerName || `لاعب ${room.players.length + 1}`).toString().trim().slice(0, 14),
-      avatar: '🧑🏻',
+      avatar: (payload.avatar || '🧑🏻').toString().trim().slice(0, 4),
       isBot: false,
       hearts: MAX_HEARTS,
       maxHp: MAX_HEARTS,
