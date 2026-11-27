@@ -24,6 +24,7 @@ const BOT_NAMES = ['Bot_Alpha', 'Bot_Sniper', 'Bot_Shadow', 'Bot_Viper', 'Bot_Gh
 const BOT_AVATARS = ['🤖', '🦾', '👾', '🎭', '💀'];
 
 const rooms = new Map();
+const onlineUsers = new Map(); // uid -> { socketId, uid, friendId, name, avatar }
 
 function normalizeCode(raw) {
   return String(raw || '').trim().toUpperCase();
@@ -432,6 +433,82 @@ function executeBotTurn(room, bot) {
 }
 
 io.on('connection', (socket) => {
+  // ==================== ONLINE PRESENCE & FRIEND INVITES ====================
+  socket.on('register_user', (payload = {}) => {
+    const uid = String(payload.uid || '').trim();
+    if (!uid) return;
+    socket.data.uid = uid;
+    onlineUsers.set(uid, {
+      socketId: socket.id,
+      uid,
+      friendId: String(payload.friendId || '').trim().toUpperCase(),
+      name: (payload.name || 'لاعب').toString().trim().slice(0, 14),
+      avatar: (payload.avatar || '😎').toString().trim().slice(0, 4)
+    });
+    socket.broadcast.emit('friend_presence_changed', { uid, online: true });
+  });
+
+  socket.on('unregister_user', () => {
+    const uid = socket.data.uid;
+    if (!uid) return;
+    const entry = onlineUsers.get(uid);
+    if (entry && entry.socketId === socket.id) {
+      onlineUsers.delete(uid);
+      socket.broadcast.emit('friend_presence_changed', { uid, online: false });
+    }
+    socket.data.uid = null;
+  });
+
+  socket.on('get_online_friends', (payload = {}, ack) => {
+    const list = Array.isArray(payload.friendUids) ? payload.friendUids : [];
+    const onlineUids = [];
+    list.forEach((uid) => {
+      const entry = onlineUsers.get(uid);
+      if (entry && io.sockets.sockets.has(entry.socketId)) {
+        onlineUids.push(uid);
+      } else if (entry) {
+        onlineUsers.delete(uid);
+      }
+    });
+    if (typeof ack === 'function') {
+      ack({ onlineUids });
+    }
+    socket.emit('online_friends_list', { onlineUids });
+  });
+
+  socket.on('send_room_invite', (payload = {}, ack) => {
+    const targetUid = String(payload.targetUid || '').trim();
+    const roomCode = normalizeCode(payload.roomCode || payload.roomId || payload.code || socket.data.roomCode);
+    if (!targetUid || !roomCode) {
+      if (typeof ack === 'function') ack({ ok: false, message: 'بيانات الدعوة غير مكتملة.' });
+      return;
+    }
+    const target = onlineUsers.get(targetUid);
+    if (!target || !io.sockets.sockets.has(target.socketId)) {
+      if (target) onlineUsers.delete(targetUid);
+      if (typeof ack === 'function') ack({ ok: false, message: 'الصديق غير متصل حالياً.' });
+      return;
+    }
+    io.to(target.socketId).emit('room_invite_received', {
+      roomCode,
+      hostName: (payload.hostName || 'صديقك').toString().trim().slice(0, 14),
+      hostAvatar: (payload.hostAvatar || '😎').toString().trim().slice(0, 4),
+      fromUid: payload.fromUid || socket.data.uid || null
+    });
+    if (typeof ack === 'function') ack({ ok: true, targetUid, message: 'تم إرسال الدعوة ✓' });
+  });
+
+  socket.on('decline_room_invite', (payload = {}) => {
+    const fromUid = String(payload.fromUid || '').trim();
+    if (!fromUid) return;
+    const inviter = onlineUsers.get(fromUid);
+    if (inviter && io.sockets.sockets.has(inviter.socketId)) {
+      io.to(inviter.socketId).emit('invite_declined', {
+        guestName: (payload.guestName || 'صديقك').toString().trim().slice(0, 14)
+      });
+    }
+  });
+
   socket.on('create_room', (payload = {}, ack) => {
     const requestedCode = normalizeCode(payload.roomId || payload.code || payload.roomCode);
     const playerToken = payload.playerToken || socket.id;
@@ -1105,6 +1182,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
+    const uid = socket.data.uid;
+    if (uid) {
+      const entry = onlineUsers.get(uid);
+      if (entry && entry.socketId === socket.id) {
+        onlineUsers.delete(uid);
+        socket.broadcast.emit('friend_presence_changed', { uid, online: false });
+      }
+    }
     const code = socket.data.roomCode;
     const room = rooms.get(code);
     if (!room) return;
