@@ -109,8 +109,14 @@ function buildLobbyPayload(room) {
       name: p.name,
       avatar: p.avatar,
       isBot: p.isBot,
+      uid: p.uid || null,
+      friendId: p.friendId || '',
+      bio: p.bio || '',
+      wins: p.wins || 0,
+      matches: p.matches || 0,
       weaponId: p.weaponId,
       skinId: p.skinId,
+      effectId: p.effectId || null,
       voiceActive: Boolean(p.voiceActive),
       voiceMuted: Boolean(p.voiceMuted)
     }))
@@ -145,8 +151,14 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
         hasShield: p.hasShield,
         shieldTurns: p.shieldTurns || 0,
         pillowTurns: isSelf ? p.pillowTurns : 0,
+        uid: p.uid || null,
+        friendId: p.friendId || '',
+        bio: p.bio || '',
+        wins: p.wins || 0,
+        matches: p.matches || 0,
         weaponId: p.weaponId,
         skinId: p.skinId,
+        effectId: p.effectId || null,
         voiceActive: Boolean(p.voiceActive),
         voiceMuted: Boolean(p.voiceMuted),
         itemsCount: p.items.length,
@@ -354,6 +366,7 @@ function performShot(room, shooterId, targetId, selfShot = false, prefixLog = ''
   io.to(room.code).emit('action_event', {
     type: 'shot',
     shooterId: shooter.id,
+    shooterEffect: shooter.effectId || null,
     targetId: target.id,
     selfShot,
     shell,
@@ -524,6 +537,10 @@ io.on('connection', (socket) => {
           hp.socketId = socket.id;
           if (payload.name || payload.playerName) hp.name = (payload.name || payload.playerName).toString().trim().slice(0, 14);
           if (payload.avatar) hp.avatar = payload.avatar.toString().trim().slice(0, 4);
+          if (payload.effectId !== undefined) hp.effectId = payload.effectId || null;
+          if (payload.uid) hp.uid = payload.uid;
+          if (payload.friendId) hp.friendId = payload.friendId;
+          if (payload.bio !== undefined) hp.bio = payload.bio.toString().trim().slice(0, 40);
         }
         socket.join(requestedCode);
         socket.data.roomCode = requestedCode;
@@ -558,8 +575,14 @@ io.on('connection', (socket) => {
       hasShield: false,
       shieldTurns: 0,
       pillowTurns: 0,
+      uid: payload.uid || null,
+      friendId: payload.friendId || '',
+      bio: (payload.bio || '').toString().trim().slice(0, 40),
+      wins: Number(payload.wins) || 0,
+      matches: Number(payload.matches) || 0,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic',
+      effectId: payload.effectId || null,
       voiceActive: false,
       voiceMuted: false
     };
@@ -613,6 +636,10 @@ io.on('connection', (socket) => {
       existingByToken.socketId = socket.id;
       if (payload.name || payload.playerName) existingByToken.name = (payload.name || payload.playerName).toString().trim().slice(0, 14);
       if (payload.avatar) existingByToken.avatar = payload.avatar.toString().trim().slice(0, 4);
+      if (payload.effectId !== undefined) existingByToken.effectId = payload.effectId || null;
+      if (payload.uid) existingByToken.uid = payload.uid;
+      if (payload.friendId) existingByToken.friendId = payload.friendId;
+      if (payload.bio !== undefined) existingByToken.bio = payload.bio.toString().trim().slice(0, 40);
       if (room.hostToken === playerToken) room.hostId = socket.id;
       socket.join(cleanCode);
       socket.data.roomCode = cleanCode;
@@ -655,8 +682,14 @@ io.on('connection', (socket) => {
       hasShield: false,
       shieldTurns: 0,
       pillowTurns: 0,
+      uid: payload.uid || null,
+      friendId: payload.friendId || '',
+      bio: (payload.bio || '').toString().trim().slice(0, 40),
+      wins: Number(payload.wins) || 0,
+      matches: Number(payload.matches) || 0,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic',
+      effectId: payload.effectId || null,
       voiceActive: false,
       voiceMuted: false
     });
@@ -1152,6 +1185,31 @@ io.on('connection', (socket) => {
     }
 
     broadcastGameState(room, msg, highlight);
+  });
+
+  socket.on('return_to_lobby', (payload = {}, ack) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room) {
+      if (typeof ack === 'function') ack({ ok: false, error: 'الغرفة لم تعد موجودة.' });
+      return;
+    }
+    const token = payload.playerToken || socket.data.playerToken;
+    const player = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (player) {
+      player.id = socket.id;
+      player.socketId = socket.id;
+      if (payload.weaponId) player.weaponId = payload.weaponId;
+      if (payload.skinId) player.skinId = payload.skinId;
+      if (payload.effectId !== undefined) player.effectId = payload.effectId || null;
+      if (room.hostToken === token) room.hostId = socket.id;
+    }
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    const lobbyPayload = buildLobbyPayload(room);
+    socket.emit('room_updated', lobbyPayload);
+    emitLobbyUpdate(room);
+    if (typeof ack === 'function') ack({ ok: true, ...lobbyPayload });
   });
 
   socket.on('leave_room', () => {
