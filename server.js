@@ -171,6 +171,12 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
 }
 
 function startNewRound(room, isFirstRound = false) {
+  clearInterval(room.timerInterval);
+  clearTimeout(room.botTimeout);
+  clearTimeout(room.roundRevealTimeout);
+  room.busy = true;
+  room.timerLeft = room.turnDuration;
+
   const alivePlayers = room.players.filter((p) => p.hearts > 0);
   const liveCount = Math.min(5, Math.max(1, Math.floor(alivePlayers.length * 0.7) + Math.floor(room.round / 2)));
   const blankCount = Math.min(5, Math.max(2, alivePlayers.length + (room.round % 2)));
@@ -203,7 +209,11 @@ function startNewRound(room, isFirstRound = false) {
     broadcastGameState(room, log, 'gold', reveal, 'match_started');
   }
   broadcastGameState(room, log, 'gold', reveal, 'game_state');
-  beginTurn(room);
+
+  room.roundRevealTimeout = setTimeout(() => {
+    if (!room.started) return;
+    beginTurn(room);
+  }, 2300);
 }
 
 function beginTurn(room) {
@@ -269,6 +279,7 @@ function advanceTurn(room) {
   if (alivePlayers.length <= 1) {
     clearInterval(room.timerInterval);
     clearTimeout(room.botTimeout);
+    clearTimeout(room.roundRevealTimeout);
     room.started = false;
     const winner = alivePlayers[0] || null;
     room.players.forEach((p) => {
@@ -484,7 +495,8 @@ io.on('connection', (socket) => {
       lastLog: 'بانتظار انضمام اللاعبين...',
       players: [hostPlayer],
       timerInterval: null,
-      botTimeout: null
+      botTimeout: null,
+      roundRevealTimeout: null
     };
 
     rooms.set(code, room);
@@ -681,13 +693,57 @@ io.on('connection', (socket) => {
     const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
     if (!sender) return;
 
-    const emoji = String(payload.emoji || '').trim().slice(0, 8);
-    if (!emoji) return;
+    sender.id = socket.id;
+    sender.socketId = socket.id;
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
 
-    io.to(room.code).emit('player_emote', {
+    const emoteId = String(payload.emoteId || payload.emoji || '').trim().slice(0, 16);
+    if (!emoteId) return;
+
+    const emotePayload = {
       playerId: sender.id,
+      playerToken: sender.token,
       playerName: sender.name,
-      emoji
+      emoteId
+    };
+
+    room.players.forEach((p) => {
+      if (!p.isBot && p.socketId) {
+        io.to(p.socketId).emit('player_emote', emotePayload);
+      }
+    });
+  });
+
+  socket.on('chat_message', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender) return;
+
+    sender.id = socket.id;
+    sender.socketId = socket.id;
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+
+    const text = String(payload.text || '').trim().slice(0, 220);
+    if (!text) return;
+
+    const chatPayload = {
+      senderId: sender.id,
+      senderToken: sender.token,
+      senderName: sender.name,
+      text,
+      timestamp: Date.now()
+    };
+
+    room.players.forEach((p) => {
+      if (!p.isBot && p.socketId) {
+        io.to(p.socketId).emit('chat_message', chatPayload);
+      }
     });
   });
 
@@ -900,6 +956,7 @@ io.on('connection', (socket) => {
     if (humans.length === 0) {
       clearInterval(room.timerInterval);
       clearTimeout(room.botTimeout);
+      clearTimeout(room.roundRevealTimeout);
       rooms.delete(code);
       return;
     }
@@ -927,6 +984,7 @@ io.on('connection', (socket) => {
       if (humans.length === 0) {
         clearInterval(currentRoom.timerInterval);
         clearTimeout(currentRoom.botTimeout);
+        clearTimeout(currentRoom.roundRevealTimeout);
         rooms.delete(code);
         return;
       }
