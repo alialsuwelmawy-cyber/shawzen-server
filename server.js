@@ -579,23 +579,38 @@ io.on('connection', (socket) => {
     socket.emit('lobby_notice', { message: 'لا يوجد بوت في المقاعد لحذفه.' });
   });
 
-  socket.on('start_match', (payload = {}) => {
+  socket.on('start_match', (payload = {}, ack) => {
     const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
     const room = rooms.get(code);
     if (!room) {
-      return socket.emit('lobby_notice', { message: 'انتهت جلسة الغرفة على السيرفر، ارجع وأنشئ غرفة جديدة.' });
+      const msg = 'انتهت جلسة الغرفة على السيرفر، ارجع وأنشئ غرفة جديدة.';
+      socket.emit('lobby_notice', { message: msg });
+      if (typeof ack === 'function') ack({ ok: false, error: msg });
+      return;
     }
     if (!isRoomHost(room, socket, payload)) {
-      return socket.emit('lobby_notice', { message: 'فقط مضيف الغرفة يمكنه بدء المواجهة.' });
+      const msg = 'فقط مضيف الغرفة يمكنه بدء المواجهة.';
+      socket.emit('lobby_notice', { message: msg });
+      if (typeof ack === 'function') ack({ ok: false, error: msg });
+      return;
     }
-    if (room.started) return;
+    if (room.started) {
+      if (typeof ack === 'function') ack({ ok: true });
+      return;
+    }
+
+    socket.join(code);
+    socket.data.roomCode = code;
 
     if ([30, 45, 60].includes(Number(payload.turnDuration))) {
       room.turnDuration = Number(payload.turnDuration);
     }
 
     if (room.players.length < 2) {
-      return socket.emit('lobby_notice', { message: 'أضف بوتاً أو انتظر لاعباً آخر لبدء المباراة (2 على الأقل).' });
+      const msg = 'أضف بوتاً أو انتظر لاعباً آخر لبدء المباراة (2 على الأقل).';
+      socket.emit('lobby_notice', { message: msg });
+      if (typeof ack === 'function') ack({ ok: false, error: msg });
+      return;
     }
 
     room.started = true;
@@ -609,6 +624,7 @@ io.on('connection', (socket) => {
       p.pillowTurns = 0;
     });
 
+    if (typeof ack === 'function') ack({ ok: true });
     startNewRound(room, true);
   });
 
@@ -795,7 +811,7 @@ io.on('connection', (socket) => {
         currentRoom.hostToken = humans[0].token;
       }
       emitLobbyUpdate(currentRoom);
-    }, 10000);
+    }, 45000);
   });
 });
 
