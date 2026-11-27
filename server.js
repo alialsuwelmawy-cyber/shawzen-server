@@ -856,13 +856,19 @@ io.on('connection', (socket) => {
   socket.on('voice_signal', (payload = {}) => {
     const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
     const room = rooms.get(code);
-    if (!room || !payload.targetSocketId || !payload.signal) return;
+    if (!room || !payload.signal) return;
 
     const token = payload.playerToken || socket.data.playerToken;
     const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
     if (!sender) return;
 
-    io.to(payload.targetSocketId).emit('voice_signal', {
+    const targetPlayer = room.players.find(
+      (p) => !p.isBot && (p.socketId === payload.targetSocketId || (payload.targetToken && p.token === payload.targetToken))
+    );
+    const destSocketId = (targetPlayer && targetPlayer.socketId) || payload.targetSocketId;
+    if (!destSocketId) return;
+
+    io.to(destSocketId).emit('voice_signal', {
       fromSocketId: socket.id,
       fromToken: sender.token,
       fromName: sender.name,
