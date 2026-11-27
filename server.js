@@ -54,6 +54,23 @@ function isRoomHost(room, socket, payload = {}) {
   return false;
 }
 
+function isCurrentTurnActor(room, socket, payload = {}) {
+  if (!room || !room.started) return null;
+  const current = room.players[room.turnIndex];
+  if (!current || current.isBot) return null;
+  if (current.id === socket.id) return current;
+  const token = payload.playerToken || socket.data.playerToken;
+  if (token && current.token && current.token === token) {
+    current.id = socket.id;
+    current.socketId = socket.id;
+    if (room.hostToken === token) room.hostId = socket.id;
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+    return current;
+  }
+  return null;
+}
+
 function createBotEntry(room) {
   const botIndex = room.players.filter((p) => p.isBot).length;
   const id = `bot_${Date.now()}_${botIndex}_${Math.floor(Math.random() * 1000)}`;
@@ -141,6 +158,7 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
       currentTurnPlayerId,
       remainingShells: room.chamber.length,
       doubleDamage: room.sawed,
+      busy: Boolean(room.busy),
       turnDuration: room.turnDuration,
       timeLeft: room.timerLeft,
       lastLog: room.lastLog,
@@ -217,7 +235,8 @@ function beginTurn(room) {
 
   room.timerInterval = setInterval(() => {
     if (!room.started || room.busy) return;
-    room.timerLeft--;
+    room.timerLeft = Math.max(0, room.timerLeft - 1);
+    io.to(room.code).emit('timer_tick', { timeLeft: room.timerLeft });
     if (room.timerLeft <= 0) {
       clearInterval(room.timerInterval);
       if (!current.isBot) {
@@ -402,6 +421,11 @@ io.on('connection', (socket) => {
         }
         socket.join(requestedCode);
         socket.data.roomCode = requestedCode;
+        if (existing.started) {
+          broadcastGameState(existing);
+          if (typeof ack === 'function') ack({ ok: true, started: true });
+          return;
+        }
         const res = buildLobbyPayload(existing);
         socket.emit('room_created', res);
         emitLobbyUpdate(existing);
@@ -480,6 +504,11 @@ io.on('connection', (socket) => {
       if (room.hostToken === playerToken) room.hostId = socket.id;
       socket.join(cleanCode);
       socket.data.roomCode = cleanCode;
+      if (room.started) {
+        broadcastGameState(room);
+        if (typeof ack === 'function') ack({ ok: true, started: true });
+        return;
+      }
       const res = buildLobbyPayload(room);
       socket.emit('room_joined', res);
       emitLobbyUpdate(room);
@@ -628,13 +657,66 @@ io.on('connection', (socket) => {
     startNewRound(room, true);
   });
 
-  socket.on('shoot', (payload = {}) => {
-    const code = normalizeCode(payload.roomId || socket.data.roomCode);
+  socket.on('aim_target', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
     const room = rooms.get(code);
     if (!room || !room.started || room.busy) return;
 
-    const current = room.players[room.turnIndex];
-    if (!current || current.id !== socket.id) return;
+    const current = isCurrentTurnActor(room, socket, payload);
+    if (!current) return;
+
+    const target = room.players.find((p) => p.id === payload.targetId && p.hearts > 0);
+    if (!target) return;
+
+    io.to(room.code).emit('aim_updated', {
+      shooterId: current.id,
+      targetId: target.id
+    });
+  });
+
+  socket.on('thief_inspect', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room || !room.started || room.busy) return;
+
+    const actor = isCurrentTurnActor(room, socket, payload);
+    if (!actor) return;
+
+    const slotIndex = Number(payload.slotIndex);
+    if (actor.items[slotIndex] !== 'thief') return;
+
+    const target = room.players.find((p) => p.id === payload.targetId && p.hearts > 0 && p.id !== actor.id);
+    if (!target) return;
+
+    if (target.hasShield) {
+      actor.items.splice(slotIndex, 1);
+      target.hasShield = false;
+      const msg = `🛡️ درع ${target.name} تصدّى للسارق وتحطّم!`;
+      socket.emit('thief_blocked');
+      io.to(room.code).emit('action_event', {
+        type: 'item',
+        ejectedShell: null,
+        message: msg,
+        highlight: 'safe'
+      });
+      broadcastGameState(room, msg, 'safe');
+      return;
+    }
+
+    socket.emit('thief_reveal', {
+      targetId: target.id,
+      targetName: target.name,
+      items: [...target.items]
+    });
+  });
+
+  socket.on('shoot', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room || !room.started || room.busy) return;
+
+    const current = isCurrentTurnActor(room, socket, payload);
+    if (!current) return;
 
     const selfShot = Boolean(payload.selfShot) || payload.targetId === current.id;
     const target = selfShot
@@ -646,12 +728,12 @@ io.on('connection', (socket) => {
   });
 
   socket.on('use_item', (payload = {}) => {
-    const code = normalizeCode(payload.roomId || socket.data.roomCode);
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
     const room = rooms.get(code);
     if (!room || !room.started || room.busy) return;
 
-    const actor = room.players[room.turnIndex];
-    if (!actor || actor.id !== socket.id) return;
+    const actor = isCurrentTurnActor(room, socket, payload);
+    if (!actor) return;
 
     const slotIndex = Number(payload.slotIndex);
     const itemKey = actor.items[slotIndex];
@@ -736,7 +818,10 @@ io.on('connection', (socket) => {
         msg = `🛡️ درع ${target.name} تصدّى للسارق وتحطّم!`;
         highlight = 'safe';
       } else if (target.items.length > 0) {
-        const stolen = target.items.pop();
+        const sIdx = Number.isInteger(Number(payload.stealIndex)) && Number(payload.stealIndex) >= 0 && Number(payload.stealIndex) < target.items.length
+          ? Number(payload.stealIndex)
+          : target.items.length - 1;
+        const stolen = target.items.splice(sIdx, 1)[0];
         if (actor.items.length < MAX_SLOTS) actor.items.push(stolen);
         msg = `🦝 ${actor.name} سرق أداة من ${target.name}!`;
         highlight = 'gold';
