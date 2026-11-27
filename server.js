@@ -109,7 +109,9 @@ function buildLobbyPayload(room) {
       avatar: p.avatar,
       isBot: p.isBot,
       weaponId: p.weaponId,
-      skinId: p.skinId
+      skinId: p.skinId,
+      voiceActive: Boolean(p.voiceActive),
+      voiceMuted: Boolean(p.voiceMuted)
     }))
   };
 }
@@ -144,6 +146,8 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
         pillowTurns: isSelf ? p.pillowTurns : 0,
         weaponId: p.weaponId,
         skinId: p.skinId,
+        voiceActive: Boolean(p.voiceActive),
+        voiceMuted: Boolean(p.voiceMuted),
         itemsCount: p.items.length,
         items: isSelf ? [...p.items] : []
       };
@@ -476,7 +480,9 @@ io.on('connection', (socket) => {
       shieldTurns: 0,
       pillowTurns: 0,
       weaponId: payload.weaponId || 'shotgun',
-      skinId: payload.skinId || 'classic'
+      skinId: payload.skinId || 'classic',
+      voiceActive: false,
+      voiceMuted: false
     };
 
     const room = {
@@ -569,7 +575,9 @@ io.on('connection', (socket) => {
       shieldTurns: 0,
       pillowTurns: 0,
       weaponId: payload.weaponId || 'shotgun',
-      skinId: payload.skinId || 'classic'
+      skinId: payload.skinId || 'classic',
+      voiceActive: false,
+      voiceMuted: false
     });
 
     socket.join(cleanCode);
@@ -744,6 +752,121 @@ io.on('connection', (socket) => {
       if (!p.isBot && p.socketId) {
         io.to(p.socketId).emit('chat_message', chatPayload);
       }
+    });
+  });
+
+  // ==================== WEBRTC VOICE CHAT SIGNALING ====================
+  socket.on('voice_join', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender || sender.isBot) return;
+
+    sender.id = socket.id;
+    sender.socketId = socket.id;
+    sender.voiceActive = true;
+    sender.voiceMuted = Boolean(payload.muted);
+    socket.join(room.code);
+    socket.data.roomCode = room.code;
+
+    const existingVoicePeers = room.players
+      .filter((p) => !p.isBot && p.socketId && p.socketId !== socket.id && p.voiceActive)
+      .map((p) => ({
+        socketId: p.socketId,
+        token: p.token,
+        name: p.name,
+        muted: Boolean(p.voiceMuted)
+      }));
+
+    socket.emit('voice_peers', { peers: existingVoicePeers });
+
+    room.players.forEach((p) => {
+      if (!p.isBot && p.socketId && p.socketId !== socket.id) {
+        if (p.voiceActive) {
+          io.to(p.socketId).emit('voice_peer_joined', {
+            socketId: sender.socketId,
+            token: sender.token,
+            name: sender.name,
+            muted: Boolean(sender.voiceMuted)
+          });
+        }
+        io.to(p.socketId).emit('voice_status_updated', {
+          playerId: sender.id,
+          playerToken: sender.token,
+          voiceActive: true,
+          voiceMuted: Boolean(sender.voiceMuted)
+        });
+      }
+    });
+  });
+
+  socket.on('voice_leave', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender) return;
+
+    sender.voiceActive = false;
+    sender.voiceMuted = false;
+
+    room.players.forEach((p) => {
+      if (!p.isBot && p.socketId && p.socketId !== socket.id) {
+        io.to(p.socketId).emit('voice_peer_left', {
+          socketId: sender.id,
+          token: sender.token
+        });
+        io.to(p.socketId).emit('voice_status_updated', {
+          playerId: sender.id,
+          playerToken: sender.token,
+          voiceActive: false,
+          voiceMuted: false
+        });
+      }
+    });
+  });
+
+  socket.on('voice_mute_state', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender) return;
+
+    sender.voiceMuted = Boolean(payload.muted);
+    room.players.forEach((p) => {
+      if (!p.isBot && p.socketId) {
+        io.to(p.socketId).emit('voice_status_updated', {
+          playerId: sender.id,
+          playerToken: sender.token,
+          voiceActive: Boolean(sender.voiceActive),
+          voiceMuted: Boolean(sender.voiceMuted)
+        });
+      }
+    });
+  });
+
+  socket.on('voice_signal', (payload = {}) => {
+    const code = normalizeCode(payload.roomId || payload.code || socket.data.roomCode);
+    const room = rooms.get(code);
+    if (!room || !payload.targetSocketId || !payload.signal) return;
+
+    const token = payload.playerToken || socket.data.playerToken;
+    const sender = room.players.find((p) => p.id === socket.id || (token && p.token && p.token === token));
+    if (!sender) return;
+
+    io.to(payload.targetSocketId).emit('voice_signal', {
+      fromSocketId: socket.id,
+      fromToken: sender.token,
+      fromName: sender.name,
+      signal: payload.signal
     });
   });
 
@@ -948,6 +1071,10 @@ io.on('connection', (socket) => {
     const code = socket.data.roomCode;
     const room = rooms.get(code);
     if (!room) return;
+    const leavingPlayer = room.players.find((p) => p.id === socket.id);
+    if (leavingPlayer) {
+      io.to(room.code).emit('voice_peer_left', { socketId: leavingPlayer.id, token: leavingPlayer.token });
+    }
     room.players = room.players.filter((p) => p.id !== socket.id);
     socket.leave(code);
     socket.data.roomCode = null;
@@ -979,6 +1106,7 @@ io.on('connection', (socket) => {
       const stillDisconnected = currentRoom.players.find((p) => p.id === socket.id);
       if (!stillDisconnected) return;
 
+      io.to(currentRoom.code).emit('voice_peer_left', { socketId: stillDisconnected.id, token: stillDisconnected.token });
       currentRoom.players = currentRoom.players.filter((p) => p.id !== socket.id);
       const humans = currentRoom.players.filter((p) => !p.isBot);
       if (humans.length === 0) {
