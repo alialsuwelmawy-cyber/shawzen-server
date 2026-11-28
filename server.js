@@ -5,7 +5,23 @@ const cors = require('cors');
 
 const app = express();
 app.use(cors());
+const telemetryStats = {
+  totalMatchesEnded: 0,
+  quickRematches: 0,
+  totalRematchPrompts: 0,
+  antiTiltTriggers: 0,
+  rareDropsAwarded: 0
+};
+
 app.get('/', (req, res) => res.send('Shawzen Online Server is Running!'));
+app.get('/stats', (req, res) => res.json({
+  activeRooms: rooms.size,
+  onlineUsers: onlineUsers.size,
+  rematchRatePct: telemetryStats.totalRematchPrompts > 0
+    ? Math.round((telemetryStats.quickRematches / telemetryStats.totalRematchPrompts) * 100)
+    : 0,
+  ...telemetryStats
+}));
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -114,6 +130,9 @@ function buildLobbyPayload(room) {
       bio: p.bio || '',
       wins: p.wins || 0,
       matches: p.matches || 0,
+      level: p.level || 1,
+      streak: p.streak || 0,
+      title: p.title || '',
       weaponId: p.weaponId,
       skinId: p.skinId,
       effectId: p.effectId || null,
@@ -156,6 +175,9 @@ function broadcastGameState(room, logMsg = null, highlight = 'neutral', roundRev
         bio: p.bio || '',
         wins: p.wins || 0,
         matches: p.matches || 0,
+        level: p.level || 1,
+        streak: p.streak || 0,
+        title: p.title || '',
         weaponId: p.weaponId,
         skinId: p.skinId,
         effectId: p.effectId || null,
@@ -299,12 +321,20 @@ function advanceTurn(room) {
     clearTimeout(room.roundRevealTimeout);
     room.started = false;
     const winner = alivePlayers[0] || null;
+    telemetryStats.totalMatchesEnded += 1;
+    const humanCount = room.players.filter((x) => !x.isBot).length;
     room.players.forEach((p) => {
       if (!p.isBot && p.socketId) {
+        const isWinner = Boolean(winner && winner.id === p.id);
         io.to(p.socketId).emit('match_ended', {
           winnerId: winner ? winner.id : null,
           winnerName: winner ? winner.name : 'لا أحد',
-          won: Boolean(winner && winner.id === p.id)
+          won: isWinner,
+          itemsUsed: p.itemsUsedInMatch || 0,
+          clutchSurvived: Boolean(p.clutchSurvived || (isWinner && p.hearts === 1)),
+          decisiveMove: room.lastDecisiveEvent || room.lastLog || '',
+          hadHumanFriend: humanCount >= 2,
+          roundsPlayed: room.round || 1
         });
       }
     });
@@ -361,6 +391,11 @@ function performShot(room, shooterId, targetId, selfShot = false, prefixLog = ''
   } else {
     logMessage = `${prefixLog ? prefixLog + ' ' : ''}💨 *تك!* رصاصة فارغة على ${selfShot ? 'نفسه' : target.name}.`.trim();
     highlight = 'safe';
+  }
+
+  room.lastDecisiveEvent = logMessage;
+  if (target.hearts === 1) {
+    target.clutchSurvived = true;
   }
 
   io.to(room.code).emit('action_event', {
@@ -541,6 +576,9 @@ io.on('connection', (socket) => {
           if (payload.uid) hp.uid = payload.uid;
           if (payload.friendId) hp.friendId = payload.friendId;
           if (payload.bio !== undefined) hp.bio = payload.bio.toString().trim().slice(0, 40);
+          if (payload.level) hp.level = Math.max(1, Number(payload.level) || 1);
+          if (payload.streak !== undefined) hp.streak = Math.max(0, Number(payload.streak) || 0);
+          if (payload.title !== undefined) hp.title = (payload.title || '').toString().trim().slice(0, 24);
         }
         socket.join(requestedCode);
         socket.data.roomCode = requestedCode;
@@ -580,6 +618,11 @@ io.on('connection', (socket) => {
       bio: (payload.bio || '').toString().trim().slice(0, 40),
       wins: Number(payload.wins) || 0,
       matches: Number(payload.matches) || 0,
+      level: Math.max(1, Number(payload.level) || 1),
+      streak: Math.max(0, Number(payload.streak) || 0),
+      title: (payload.title || '').toString().trim().slice(0, 24),
+      itemsUsedInMatch: 0,
+      clutchSurvived: false,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic',
       effectId: payload.effectId || null,
@@ -640,6 +683,9 @@ io.on('connection', (socket) => {
       if (payload.uid) existingByToken.uid = payload.uid;
       if (payload.friendId) existingByToken.friendId = payload.friendId;
       if (payload.bio !== undefined) existingByToken.bio = payload.bio.toString().trim().slice(0, 40);
+      if (payload.level) existingByToken.level = Math.max(1, Number(payload.level) || 1);
+      if (payload.streak !== undefined) existingByToken.streak = Math.max(0, Number(payload.streak) || 0);
+      if (payload.title !== undefined) existingByToken.title = (payload.title || '').toString().trim().slice(0, 24);
       if (room.hostToken === playerToken) room.hostId = socket.id;
       socket.join(cleanCode);
       socket.data.roomCode = cleanCode;
@@ -687,6 +733,11 @@ io.on('connection', (socket) => {
       bio: (payload.bio || '').toString().trim().slice(0, 40),
       wins: Number(payload.wins) || 0,
       matches: Number(payload.matches) || 0,
+      level: Math.max(1, Number(payload.level) || 1),
+      streak: Math.max(0, Number(payload.streak) || 0),
+      title: (payload.title || '').toString().trim().slice(0, 24),
+      itemsUsedInMatch: 0,
+      clutchSurvived: false,
       weaponId: payload.weaponId || 'shotgun',
       skinId: payload.skinId || 'classic',
       effectId: payload.effectId || null,
@@ -800,6 +851,8 @@ io.on('connection', (socket) => {
       p.hasShield = false;
       p.shieldTurns = 0;
       p.pillowTurns = 0;
+      p.itemsUsedInMatch = 0;
+      p.clutchSurvived = false;
     });
 
     if (typeof ack === 'function') ack({ ok: true });
@@ -1168,6 +1221,9 @@ io.on('connection', (socket) => {
       }
     }
 
+    actor.itemsUsedInMatch = (actor.itemsUsedInMatch || 0) + 1;
+    room.lastDecisiveEvent = msg;
+
     io.to(room.code).emit('action_event', {
       type: 'item',
       ejectedShell,
@@ -1202,6 +1258,9 @@ io.on('connection', (socket) => {
       if (payload.weaponId) player.weaponId = payload.weaponId;
       if (payload.skinId) player.skinId = payload.skinId;
       if (payload.effectId !== undefined) player.effectId = payload.effectId || null;
+      if (payload.level) player.level = Math.max(1, Number(payload.level) || 1);
+      if (payload.streak !== undefined) player.streak = Math.max(0, Number(payload.streak) || 0);
+      if (payload.title !== undefined) player.title = (payload.title || '').toString().trim().slice(0, 24);
       if (room.hostToken === token) room.hostId = socket.id;
     }
     socket.join(room.code);
@@ -1210,6 +1269,20 @@ io.on('connection', (socket) => {
     socket.emit('room_updated', lobbyPayload);
     emitLobbyUpdate(room);
     if (typeof ack === 'function') ack({ ok: true, ...lobbyPayload });
+  });
+
+  socket.on('telemetry_event', (payload = {}) => {
+    const evType = String(payload.type || '');
+    if (evType === 'quick_rematch') {
+      telemetryStats.quickRematches += 1;
+      telemetryStats.totalRematchPrompts += 1;
+    } else if (evType === 'rematch_declined') {
+      telemetryStats.totalRematchPrompts += 1;
+    } else if (evType === 'anti_tilt_triggered') {
+      telemetryStats.antiTiltTriggers += 1;
+    } else if (evType === 'rare_drop') {
+      telemetryStats.rareDropsAwarded += 1;
+    }
   });
 
   socket.on('leave_room', () => {
